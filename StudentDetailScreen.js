@@ -2,10 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, TextInput, Button, StyleSheet, TouchableOpacity, Alert, ScrollView, Modal } from 'react-native';
 import axios from 'axios';
 import useBackButton from './useBackButton';
-
+import GradeManagementModal from './GradeManagementModal';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 const API_URL = 'http://10.0.2.2:5000/api';
 
-// Imported utility functions
 const fetchStudentGrades = async (studentId, token) => {
   try {
     const response = await axios.get(
@@ -21,7 +21,44 @@ const fetchStudentGrades = async (studentId, token) => {
   }
 };
 
+const getToken = async () => {
+  try {
+    return await AsyncStorage.getItem('token');
+  } catch (error) {
+    console.error('Error retrieving token:', error);
+    return null;
+  }
+};
+
+const fetchEnrolledCourses = async () => {
+  try {
+    const token = await getToken();
+
+    const response = await fetch(`/api/students/${student._id}/courses`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      setEnrolledCourses(data.courses);
+
+      // Fetch grades for each course
+      for (const course of data.courses) {
+        fetchCourseGrades(course._id);
+      }
+    } else {
+      console.error('Failed to fetch enrolled courses');
+    }
+  } catch (error) {
+    console.error('Error fetching enrolled courses:', error);
+  } finally {
+  }
+};
+
 const addGrade = async (studentId, courseId, score, comment = "", token) => {
+console.log('API_URL:', API_URL);
   try {
     const response = await axios.post(
       `${API_URL}/grades`,
@@ -78,22 +115,36 @@ const fetchCourseStatistics = async (courseId, token) => {
   }
 };
 
-const fetchCourseGrades = async (courseId, token) => {
+const fetchCourseGrades = async (courseId) => {
   try {
-    const response = await axios.get(
-      `${API_URL}/grades/course/${courseId}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
+    const token = await getToken();
+    const response = await fetch(`${API_URL}/grades/course/${courseId}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
 
-    return response.data;
-  } catch (err) {
-    console.error('Error fetching course grades:', err.response?.data || err.message);
-    Alert.alert('Error', 'Failed to fetch course grades');
-    return null;
+    if (!response.ok) {
+      throw new Error(`Failed to fetch grades for course ${courseId}`);
+    }
+
+    const data = await response.json();
+    // Update courseGrades state with the fetched grades
+    setCourseGrades(prevGrades => ({
+      ...prevGrades,
+      [courseId]: data.grades // The backend returns grades array
+    }));
+
+    return data;
+  } catch (error) {
+    console.error(`Error fetching grades for course ${courseId}:`, error);
+    throw error;
   }
 };
 
 export default function StudentDetailScreen({ route }) {
+  const [courseGrades, setCourseGrades] = useState({});
+  const [showGradeModal, setShowGradeModal] = useState(false);
   const { student, token } = route.params;
   const [subjectsMap, setSubjectsMap] = useState({});
   const [newSubject, setNewSubject] = useState('');
@@ -105,6 +156,8 @@ export default function StudentDetailScreen({ route }) {
   const [activeTab, setActiveTab] = useState('subjects');
   const [availableCourses, setAvailableCourses] = useState([]);
   const [enrolledCourses, setEnrolledCourses] = useState([]);
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [selectedCourseForGrading, setSelectedCourseForGrading] = useState(null);
   const [newCourse, setNewCourse] = useState({
     name: '',
     courseCode: '',
@@ -127,8 +180,17 @@ export default function StudentDetailScreen({ route }) {
   useBackButton();
 
   useEffect(() => {
+    if (activeTab === 'grades') {
+        fetchEnrolledCourses();
+      }
+
     if (student?.subjects) {
       setSubjectsMap(student.subjects);
+    }
+    if (enrolledCourses && enrolledCourses.length > 0) {
+      enrolledCourses.forEach(course => {
+        fetchCourseGrades(course._id);
+      });
     }
 
     const fetchStudentData = async () => {
@@ -197,7 +259,6 @@ export default function StudentDetailScreen({ route }) {
     const loadStudentGrades = async () => {
       const grades = await fetchStudentGrades(student._id, token);
       if (grades && grades.grades) {
-        // Process grades data into subjects map if needed
         // This would depend on the format returned by the API
       }
     };
@@ -207,7 +268,7 @@ export default function StudentDetailScreen({ route }) {
     fetchAbsences();
     fetchCoursesData();
     loadStudentGrades();
-  }, [student._id, token]);
+  }, [enrolledCourses],[student._id, token],[activeTab, student._id]);
 
   const toggleSubject = (subject) => {
     setExpandedSubjects(prev => ({
@@ -223,28 +284,6 @@ export default function StudentDetailScreen({ route }) {
     }));
   };
 
-  const handleAddSubject = async () => {
-    if (!newSubject.trim()) return;
-
-    try {
-      const response = await axios.post(`${API_URL}/grades`, {
-        studentId: student._id,
-        subject: newSubject.trim(),
-        grade: null // Initially no grade
-      }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      // Update local state with the response
-      const updatedSubjects = {...subjectsMap};
-      updatedSubjects[newSubject.trim()] = [];
-      setSubjectsMap(updatedSubjects);
-
-      setNewSubject('');
-    } catch (err) {
-      console.error('Error adding subject:', err.response?.data || err.message);
-    }
-  };
 
   const handleAddInfraction = async () => {
     if (!newInfraction.infracType || !newInfraction.description) return;
@@ -300,65 +339,60 @@ export default function StudentDetailScreen({ route }) {
     }
   };
 
-  // Updated to use the new grade function
-  const handleAddGrade = async (subject) => {
-    const score = gradeInputs[subject];
+const handleAddGrade = async (gradeData) => {
+  console.log('handleAddGrade called with:', gradeData);
+  try {
+    const token = await getToken();
+    console.log('Token retrieved, sending request');
 
-    if (!score || !score.trim()) return;
+    const response = await fetch(`${API_URL}/grades`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(gradeData)
+    });
 
-    // Find courseId if available (may need to be adjusted based on your data structure)
-    const courseId = enrolledCourses.find(course => course.name === subject)?._id || null;
-
-    const newGrade = await addGrade(student._id, courseId, score.trim(), "", token);
-
-    if (newGrade) {
-      // Update the local state with the new grade
-      const updatedSubjects = {...subjectsMap};
-      if (!updatedSubjects[subject]) {
-        updatedSubjects[subject] = [];
-      }
-      updatedSubjects[subject].push(score.trim());
-      setSubjectsMap(updatedSubjects);
-
-      setGradeInputs(prev => ({
-        ...prev,
-        [subject]: '',
-      }));
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error(`Failed to add grade, status ${response.status}: ${errorBody}`);
+      throw new Error('Failed to add grade');
     }
-  };
 
-  const handleRemoveLatestGrade = async (subject) => {
+    // Refresh grades for this course
+    fetchCourseGrades(gradeData.courseId);
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error adding grade:', error);
+    throw error;
+  }
+};
+
+  const handleRemoveLastGrade = async (gradeId) => {
     try {
-      // Get the grades for this subject and student first
-      const response = await axios.get(
-        `${API_URL}/grades`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { studentId: student._id, subject }
+      const courseId = selectedCourseForGrading._id;
+      const token = await getToken();
+
+      const response = await fetch(`/api/grades/${gradeId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
         }
-      );
+      });
 
-      // Get the latest grade ID
-      const grades = response.data.grades || [];
-      if (grades.length > 0) {
-        const latestGrade = grades[grades.length - 1];
-
-        // Delete the grade using the DELETE grades/:id route
-        await axios.delete(
-          `${API_URL}/grades/${latestGrade._id}`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-
-        // Update local state
-        const updatedSubjects = {...subjectsMap};
-        if (updatedSubjects[subject] && updatedSubjects[subject].length > 0) {
-          updatedSubjects[subject].pop();
-          setSubjectsMap(updatedSubjects);
-        }
+      if (!response.ok) {
+        throw new Error('Failed to remove grade');
       }
-    } catch (err) {
-      console.error('Error removing grade:', err.response?.data || err.message);
-      Alert.alert('Error', 'Failed to remove grade');
+
+      // Refresh grades for this course
+      fetchCourseGrades(courseId);
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error removing grade:', error);
+      throw error;
     }
   };
 
@@ -481,72 +515,73 @@ export default function StudentDetailScreen({ route }) {
       Alert.alert('Error', 'Failed to create course or enroll student');
     }
   };
+// Function to render grades content
+const renderGradesContent = () => {
+  return (
+    <View style={styles.gradesContainer}>
+      <Text style={styles.sectionTitle}>Student Grades by Course</Text>
 
-  const renderSubjectsContent = () => {
-    return (
-      <>
-        <View style={styles.subheader}>
-          <Text style={styles.sectionHeaderText}>Add New Subject</Text>
-          <View style={styles.inline}>
-            <TextInput
-              style={[styles.input, { flex: 2 }]}
-              placeholder="Subject name"
-              value={newSubject}
-              onChangeText={setNewSubject}
-            />
-            <View style={styles.addButtonContainer}>
-              <Button title="Add" onPress={handleAddSubject} />
-            </View>
-          </View>
-        </View>
-
-        {Object.keys(subjectsMap).length === 0 ? (
-          <Text style={styles.emptyMessage}>No subjects added yet</Text>
-        ) : (
-          Object.keys(subjectsMap).map((subject, index) => (
-            <View key={`subject-${index}`} style={styles.subjectCard}>
-              <TouchableOpacity onPress={() => toggleSubject(subject)}>
-                <Text style={styles.subjectTitle}>{subject}</Text>
+      {enrolledCourses.length > 0 ? (
+        enrolledCourses.map(course => (
+          <View key={course._id} style={styles.courseGradeSection}>
+            <View style={styles.courseHeaderRow}>
+              <Text style={styles.courseName}>{course.name}</Text>
+              <TouchableOpacity
+                style={styles.addGradeButton}
+                onPress={() => {
+                  setSelectedCourseForGrading(course);
+                  setShowGradeModal(true);
+                }}
+              >
+                <Text style={styles.addGradeButtonText}>+ Add Grade</Text>
               </TouchableOpacity>
-
-              {expandedSubjects[subject] && (
-                <View>
-                  <View style={styles.gradesContainer}>
-                    <Text style={styles.gradesTitle}>Grades:</Text>
-                    {subjectsMap[subject] && subjectsMap[subject].length > 0 && (
-                      <TouchableOpacity
-                        style={styles.deleteButton}
-                        onPress={() => handleRemoveLatestGrade(subject)}
-                      >
-                        <Text style={styles.deleteButtonText}>Remove Latest</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                  <Text>
-                    {Array.isArray(subjectsMap[subject]) && subjectsMap[subject].length > 0
-                      ? subjectsMap[subject].join(', ')
-                      : 'No grades yet'}
-                  </Text>
-                  <View style={styles.inline}>
-                    <TextInput
-                      style={[styles.input, { flex: 2 }]}
-                      placeholder="Enter grade"
-                      value={gradeInputs[subject] || ''}
-                      onChangeText={(text) => setGradeInputs(prev => ({ ...prev, [subject]: text }))}
-                    />
-                    <View style={{ marginLeft: 10 }}>
-                      <Button title="Add Grade" onPress={() => handleAddGrade(subject)} />
-                    </View>
-                  </View>
-                </View>
-              )}
             </View>
-          ))
-        )}
-      </>
-    );
-  };
 
+            {/* Display existing grades for this course */}
+            {courseGrades[course._id] && courseGrades[course._id].length > 0 ? (
+              courseGrades[course._id].map((grade, index) => (
+                <View key={index} style={styles.gradeItem}>
+                  <Text style={styles.gradeTitle}>
+                    {grade.assignmentName || "General Grade"}
+                  </Text>
+                  <Text style={styles.gradeScore}>Score: {grade.score}</Text>
+                  {grade.comment && (
+                    <Text style={styles.gradeComment}>{grade.comment}</Text>
+                  )}
+                  <Text style={styles.gradeDate}>
+                    {new Date(grade.gradedAt).toLocaleDateString()}
+                  </Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.noGradesText}>No grades recorded for this course</Text>
+            )}
+          </View>
+        ))
+      ) : (
+        <Text style={styles.noCoursesText}>Student is not enrolled in any courses</Text>
+      )}
+
+      {/* Grade Management Modal */}
+      {selectedCourseForGrading && (
+        <GradeManagementModal
+          visible={showGradeModal}
+          onClose={() => {
+            setShowGradeModal(false);
+            // Refresh grades when modal is closed
+            fetchCourseGrades(selectedCourseForGrading._id);
+          }}
+          courseId={selectedCourseForGrading._id}
+          courseName={selectedCourseForGrading.name}
+          students={[student]} // Just this student
+          assignments={selectedCourseForGrading.assignments || []}
+          onAddGrade={handleAddGrade}
+          onRemoveLastGrade={handleRemoveLastGrade}
+        />
+      )}
+    </View>
+  );
+};
   const renderInfractionsContent = () => {
     return (
       <>
@@ -664,7 +699,6 @@ export default function StudentDetailScreen({ route }) {
     );
   };
 
-  // New component to render courses content
   const renderCoursesContent = () => {
     return (
       <>
@@ -682,7 +716,11 @@ export default function StudentDetailScreen({ route }) {
           <Text style={styles.emptyMessage}>Not enrolled in any courses</Text>
         ) : (
           enrolledCourses.map((course, index) => (
-            <View key={`enrolled-${index}`} style={styles.courseCard}>
+            <TouchableOpacity
+              key={course._id || `enrolled-${index}`}
+              style={styles.courseCard}
+              onPress={() => setSelectedCourse(course)}
+            >
               <View style={styles.courseHeader}>
                 <Text style={styles.courseTitle}>{course.name}</Text>
                 <Text style={styles.courseCode}>{course.courseCode}</Text>
@@ -708,16 +746,22 @@ export default function StudentDetailScreen({ route }) {
                   <Text style={styles.buttonText}>Unenroll</Text>
                 </TouchableOpacity>
               </View>
-            </View>
+            </TouchableOpacity>
           ))
         )}
 
         <Text style={styles.listHeaderText}>Available Courses</Text>
         {availableCourses.length === 0 ? (
-          <Text style={styles.emptyMessage}>No available courses to enroll in</Text>
+          <Text style={styles.emptyMessage}>
+            No available courses to enroll in
+          </Text>
         ) : (
           availableCourses.map((course, index) => (
-            <View key={`available-${index}`} style={styles.courseCard}>
+            <TouchableOpacity
+              key={course._id || `available-${index}`}
+              style={styles.courseCard}
+              onPress={() => setSelectedCourse(course)}
+            >
               <View style={styles.courseHeader}>
                 <Text style={styles.courseTitle}>{course.name}</Text>
                 <Text style={styles.courseCode}>{course.courseCode}</Text>
@@ -743,7 +787,7 @@ export default function StudentDetailScreen({ route }) {
                   <Text style={styles.buttonText}>Enroll</Text>
                 </TouchableOpacity>
               </View>
-            </View>
+            </TouchableOpacity>
           ))
         )}
 
@@ -762,21 +806,27 @@ export default function StudentDetailScreen({ route }) {
                 style={styles.input}
                 placeholder="Course Name *"
                 value={newCourse.name}
-                onChangeText={(text) => setNewCourse({...newCourse, name: text})}
+                onChangeText={(text) =>
+                  setNewCourse({ ...newCourse, name: text })
+                }
               />
 
               <TextInput
                 style={styles.input}
                 placeholder="Course Code *"
                 value={newCourse.courseCode}
-                onChangeText={(text) => setNewCourse({...newCourse, courseCode: text})}
+                onChangeText={(text) =>
+                  setNewCourse({ ...newCourse, courseCode: text })
+                }
               />
 
               <TextInput
                 style={styles.input}
                 placeholder="Description"
                 value={newCourse.description}
-                onChangeText={(text) => setNewCourse({...newCourse, description: text})}
+                onChangeText={(text) =>
+                  setNewCourse({ ...newCourse, description: text })
+                }
                 multiline={true}
                 numberOfLines={3}
               />
@@ -808,25 +858,25 @@ export default function StudentDetailScreen({ route }) {
       <Text style={styles.header}>Student: {student.firstName} {student.lastName}</Text>
 
       <View style={styles.tabContainer}>
-        <TouchableOpacity style={styles.tabButton} onPress={() => setActiveTab('subjects')}>
-          <Text style={activeTab === 'subjects' ? styles.activeTabText : undefined}>Subjects</Text>
-        </TouchableOpacity>
         <TouchableOpacity style={styles.tabButton} onPress={() => setActiveTab('infractions')}>
-          <Text style={activeTab === 'infractions' ? styles.activeTabText : undefined}>Infractions</Text>
+          <Text style={activeTab === 'infractions' ? styles.activeTabText : styles.tabText}>Infractions</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.tabButton} onPress={() => setActiveTab('absences')}>
-          <Text style={activeTab === 'absences' ? styles.activeTabText : undefined}>Absences</Text>
+          <Text style={activeTab === 'absences' ? styles.activeTabText : styles.tabText}>Absences</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.tabButton} onPress={() => setActiveTab('courses')}>
-          <Text style={activeTab === 'courses' ? styles.activeTabText : undefined}>Courses</Text>
+          <Text style={activeTab === 'courses' ? styles.activeTabText : styles.tabText}>Courses</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.tabButton} onPress={() => setActiveTab('grades')}>
+          <Text style={activeTab === 'grades' ? styles.activeTabText : styles.tabText}>Grades</Text>
         </TouchableOpacity>
       </View>
 
       <ScrollView>
-        {activeTab === 'subjects' && renderSubjectsContent()}
         {activeTab === 'infractions' && renderInfractionsContent()}
         {activeTab === 'absences' && renderAbsencesContent()}
         {activeTab === 'courses' && renderCoursesContent()}
+        {activeTab === 'grades' && renderGradesContent()}
       </ScrollView>
     </View>
   );
@@ -885,18 +935,6 @@ const styles = StyleSheet.create({
   activeTabText: {
     fontWeight: 'bold',
     textDecorationLine: 'underline',
-  },
-  subjectCard: {
-    padding: 10,
-    marginBottom: 10,
-    backgroundColor: '#f9f9f9',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#eee',
-  },
-  subjectTitle: {
-    fontWeight: 'bold',
-    fontSize: 16,
   },
   gradesContainer: {
     flexDirection: 'row',
@@ -1101,4 +1139,74 @@ const styles = StyleSheet.create({
       color: 'white',
       fontWeight: 'bold',
     },
+    gradesContainer: {
+        padding: 15,
+      },
+      sectionTitle: {
+        fontSize: 18,
+        fontWeight: 'bold',
+        marginBottom: 15,
+      },
+      courseGradeSection: {
+        marginBottom: 20,
+        borderWidth: 1,
+        borderColor: '#ddd',
+        borderRadius: 8,
+        padding: 12,
+      },
+      courseHeaderRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 10,
+        borderBottomWidth: 1,
+        borderBottomColor: '#eee',
+        paddingBottom: 8,
+      },
+      courseName: {
+        fontSize: 16,
+        fontWeight: 'bold',
+      },
+      addGradeButton: {
+        backgroundColor: '#3498db',
+        paddingVertical: 5,
+        paddingHorizontal: 10,
+        borderRadius: 5,
+      },
+      addGradeButtonText: {
+        color: 'white',
+        fontWeight: '500',
+      },
+      gradeItem: {
+        marginVertical: 5,
+        paddingVertical: 8,
+        paddingHorizontal: 10,
+        backgroundColor: '#f9f9f9',
+        borderRadius: 5,
+      },
+      gradeTitle: {
+        fontWeight: '500',
+      },
+      gradeScore: {
+        marginTop: 3,
+      },
+      gradeComment: {
+        marginTop: 3,
+        fontStyle: 'italic',
+        color: '#666',
+      },
+      noGradesText: {
+        fontStyle: 'italic',
+        color: '#999',
+        marginTop: 5,
+      },
+      noCoursesText: {
+        fontStyle: 'italic',
+        color: '#999',
+        marginTop: 10,
+        textAlign: 'center',
+      },
+      tabText: {
+        color: '#666',
+      },
 });
